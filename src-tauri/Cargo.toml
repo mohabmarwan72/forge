@@ -23,10 +23,14 @@ tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri-plugin-store = "2.4.2"
-window-vibrancy = "0.6"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-fs = "2.5.0"
 tauri-plugin-notification = "2.3.3"
 tauri-plugin-autostart = "2.5.1"
 user-idle = "0.6.0"
+tauri-plugin-os = "2.3.2"
+
+# window-vibrancy only compiles on macOS (uses NSVisualEffectView).
+[target.'cfg(target_os = "macos")'.dependencies]
+window-vibrancy = "0.6"
 

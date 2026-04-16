@@ -33,7 +33,12 @@ export type SyncBlob = {
   updatedBy: string;
 };
 
-const ICLOUD_FOLDER = "Library/Mobile Documents/com~apple~CloudDocs/Forge";
+// Per-platform sync folder:
+//  - macOS: iCloud Drive (auto-synced across Macs by Apple)
+//  - Windows / Linux: user's Documents folder under "Forge" (user can put
+//    Documents inside OneDrive / Dropbox / Nextcloud for multi-device sync).
+const MAC_SYNC_FOLDER = "Library/Mobile Documents/com~apple~CloudDocs/Forge";
+const GENERIC_SYNC_FOLDER = "Documents/Forge";
 const BLOB_FILENAME = "data.json";
 
 const DEVICE_ID_KEY = "hour-tracker-device-id";
@@ -47,9 +52,19 @@ function deviceId(): string {
   return id;
 }
 
+async function syncFolderForPlatform(): Promise<string> {
+  try {
+    const { platform } = await import("@tauri-apps/plugin-os");
+    return platform() === "macos" ? MAC_SYNC_FOLDER : GENERIC_SYNC_FOLDER;
+  } catch {
+    return GENERIC_SYNC_FOLDER;
+  }
+}
+
 export async function syncDirPath(): Promise<string> {
   const home = await homeDir();
-  return await join(home, ICLOUD_FOLDER);
+  const folder = await syncFolderForPlatform();
+  return await join(home, folder);
 }
 
 export async function syncFilePath(): Promise<string> {

@@ -17,25 +17,41 @@
     "fs:default",
     {
       "identifier": "fs:allow-read-text-file",
-      "allow": [{ "path": "$HOME/Library/Mobile Documents/**" }]
+      "allow": [
+        { "path": "$HOME/Library/Mobile Documents/**" },
+        { "path": "$HOME/Documents/**" }
+      ]
     },
     {
       "identifier": "fs:allow-write-text-file",
-      "allow": [{ "path": "$HOME/Library/Mobile Documents/**" }]
+      "allow": [
+        { "path": "$HOME/Library/Mobile Documents/**" },
+        { "path": "$HOME/Documents/**" }
+      ]
     },
     {
       "identifier": "fs:allow-exists",
-      "allow": [{ "path": "$HOME/Library/Mobile Documents/**" }]
+      "allow": [
+        { "path": "$HOME/Library/Mobile Documents/**" },
+        { "path": "$HOME/Documents/**" }
+      ]
     },
     {
       "identifier": "fs:allow-mkdir",
-      "allow": [{ "path": "$HOME/Library/Mobile Documents/**" }]
+      "allow": [
+        { "path": "$HOME/Library/Mobile Documents/**" },
+        { "path": "$HOME/Documents/**" }
+      ]
     },
     {
       "identifier": "fs:allow-stat",
-      "allow": [{ "path": "$HOME/Library/Mobile Documents/**" }]
+      "allow": [
+        { "path": "$HOME/Library/Mobile Documents/**" },
+        { "path": "$HOME/Documents/**" }
+      ]
     },
     "notification:default",
-    "autostart:default"
+    "autostart:default",
+    "os:default"
   ]
 }

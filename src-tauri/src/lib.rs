@@ -128,6 +128,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(timer_state.clone())
+        .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
