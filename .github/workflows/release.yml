@@ -1,21 +1,32 @@
 name: Release
 
-# Builds Forge on every tag push (e.g. v0.2.0) and uploads the artifacts
-# to a GitHub Release. macOS for now; Windows + Linux will be added after
-# the macOS-only code is branched.
+# Builds Forge for macOS, Windows, and Linux on every tag push (e.g. v0.2.2)
+# and attaches all bundles to a GitHub Release.
 
 on:
   push:
     tags:
       - "v*"
 
-env:
-  VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
-  VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
-
 jobs:
-  build-macos:
-    runs-on: macos-latest
+  build:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            rust_target: aarch64-apple-darwin
+            bundles: dmg
+          - platform: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            bundles: msi,nsis
+          - platform: ubuntu-22.04
+            rust_target: x86_64-unknown-linux-gnu
+            bundles: appimage,deb
+
+    runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
 
@@ -27,41 +38,37 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin
+          targets: ${{ matrix.rust_target }}
 
       - name: Cache cargo
         uses: swatinem/rust-cache@v2
         with:
           workspaces: "src-tauri -> target"
 
-      - name: Install deps
+      - name: Install Linux system deps
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Install JS deps
         run: npm ci
 
-      - name: Build Forge
-        run: npm run tauri build -- --target aarch64-apple-darwin
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+      - name: Build & bundle
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
         with:
-          name: forge-macos-aarch64
-          path: |
-            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
-            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz
-
-  release:
-    needs: build-macos
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: artifacts/**/*
-          draft: false
-          generate_release_notes: true
+          tagName: ${{ github.ref_name }}
+          releaseName: "Forge ${{ github.ref_name }}"
+          releaseBody: "Auto-generated release. See commits for changes."
+          releaseDraft: false
+          prerelease: false
+          args: --target ${{ matrix.rust_target }} --bundles ${{ matrix.bundles }}
