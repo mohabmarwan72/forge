@@ -1,165 +1,121 @@
-# Hour Tracker — Project State
+# Forge — Project State
 
-*Last saved: 2026-04-15*
+*Last saved: 2026-04-16*
 
-A macOS menubar app that tracks daily hours against locked goals with a LoL-style ranked system, streaks, money tracking, and iCloud sync. Built in Tauri + React.
+A menubar hour-tracker with a ranked ladder. Compete with friends on LP, streaks, hours. Liquid-glass UI, Supabase-powered real-time leaderboard, iCloud sync between your own Macs.
 
-## Two builds
+## This folder IS the project
 
-There are **two separate projects** on disk, both identical in code shape but configured differently:
+`/Users/mohabmarwan/Documents/forge-public` — the canonical Forge codebase. Live on GitHub at **https://github.com/mohabmarwan72/forge** (private repo, owner: `mohabmarwan72`).
 
-| Folder | App name | Bundle ID | iCloud folder | Shortcut | Status |
-|--------|----------|-----------|---------------|----------|--------|
-| `/Users/mohabmarwan/Documents/hour-tracker` | Hour Tracker | `com.mohab.hourtracker` | `HourTracker/` | `⌘⌥T` | **Production — my daily app, don't break** |
-| `/Users/mohabmarwan/Documents/hour-tracker-dev` | Hour Tracker Dev | `com.mohab.hourtracker.dev` | `HourTrackerDev/` | `⌘⌥D` | **Dev / staging — experimental changes live here** |
+The old `hour-tracker` and `hour-tracker-dev` folders are deprecated — kept only as historical snapshots. Don't edit them.
 
-Dev is where all new features go first. Prod only gets updates after manual promotion.
+## Build variants from the same source
 
-## Personal vs public builds (dev project)
+| Build | Command | What it's for |
+|------|---------|---------------|
+| **Personal** (Mohab's) | `VITE_PERSONAL=true npm run tauri build` | Has Money tab, currency setting, CSV export. For the owner. |
+| **Public** (friends) | `npm run tauri build` | Money tab hidden. For anyone else. |
 
-`VITE_PERSONAL=true npm run tauri build` → shows Money tab (personal / owner build).
-`npm run tauri build` → hides Money tab (for distribution to friends).
+Both builds share:
+- Same Supabase project → same ladder
+- Bundle ID `com.mohab.forge`
+- Product name "Forge"
+- iCloud folder `Forge/` on macOS, `Documents/Forge/` on Windows + Linux
+- Shortcut `⌘⌥F` (Ctrl+Alt+F on Win/Linux)
 
-## Tech stack
+## Installed right now
 
-- **Tauri 2** (Rust backend + webview UI)
-- **React 19 + TypeScript + Vite**
-- **Plugins**: `store`, `fs`, `notification`, `autostart`, `global-shortcut`, `window-vibrancy`, `user-idle`
-- **Data**: single JSON blob at `~/Library/Mobile Documents/com~apple~CloudDocs/HourTrackerDev/data.json` (iCloud-synced)
-- **No backend yet** — everything is local + iCloud.
+- `/Applications/Forge.app` → personal build v0.2.3 (Mohab's daily app)
+- `Desktop/Forge_Personal_0.2.3.dmg` → for sending to his second Mac
+- `/Applications/Hour Tracker.app` → old, can be deleted
+- `/Applications/Forge Dev.app` → old dev, can be deleted
 
-## Build / install commands
+## How releases work (GitHub Actions)
 
+Every time a tag like `v0.2.4` is pushed to GitHub:
+
+1. **macOS** runner → builds `.dmg`
+2. **Windows** runner → builds `.msi` + `.exe-setup`
+3. **Linux (Ubuntu 22.04)** runner → builds `.AppImage` + `.deb`
+4. All attached to a GitHub Release at `releases/tag/v0.2.4`.
+
+**One command from Mohab to ship a new version:**
 ```bash
-cd /Users/mohabmarwan/Documents/hour-tracker-dev
-# personal build with Money tab:
-VITE_PERSONAL=true npm run tauri build
-# install:
-rm -rf "/Applications/Hour Tracker Dev.app"
-cp -R "src-tauri/target/release/bundle/macos/Hour Tracker Dev.app" /Applications/
-xattr -cr "/Applications/Hour Tracker Dev.app"
-open "/Applications/Hour Tracker Dev.app"
+# bump version in src-tauri/tauri.conf.json, package.json, src-tauri/Cargo.toml
+git add -A && git commit -m "bump to v0.2.4"
+git tag v0.2.4 && git push --tags
 ```
 
-## What's built (dev project)
+~15 min later the release is live.
 
-### Core
-- Count-up timer (not a pomodoro) — per-project
-- Daily **locked goal** (4–24h range, set once, immutable)
-- Projects persist forever (global list, add/rename/delete)
-- Per-project allocations with remaining-hours feedback (+ green when over-allocating)
-- "+ Add time" (manual session) **removed** — was a cheating vector
-- Carry-over hours **removed** — simplified model, penalty handles it
-- Break timer (10-min countdown, auto-resume)
-- Session counter (50-min blocks)
-- History modal (today's sessions)
+**Repo secrets** already set: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`. Don't need to touch again.
 
-### Rank system
-- 11 tiers Wood → Challenger
-- **Wood–Master** have 3 divisions (III → II → I), 100 LP each
-- **GM** is a single 500-LP window (no divisions)
-- **Challenger** is unlimited (no divisions, top of ladder)
-- Custom hex-gem SVG icons per rank (`src/RankIcon.tsx`)
-- **Season reset** every Jan 1 — placement boost drops you 1 rank below final, at division III
-- "Days per tier" histogram saved per past season
+## Current shipped version: v0.2.3
 
-### LP math (all whole numbers)
-- **+6 LP/hour** worked (first 10 hours)
-- **+8 LP/hour** for overtime (past 10h, only if goal > 10h)
-- **−3 LP/hour** missed, past days only (never today)
-- Penalty target clamped to **4–10h window** (goal < 4 treated as 4; goal > 10 treated as 10)
-- **−10 LP/day** at GM+ only, when streak enters decay phase
+Latest confirmed:
+- macOS ✅ (auto-built, on releases page for v0.2.2; v0.2.3 is the latest)
+- Windows ✅ (auto-built)
+- Linux ✅ (auto-built in v0.2.3 after libxss-dev fix)
+- Personal DMG ✅ (on Mohab's Desktop)
 
-### Streaks 🔥
-- +1 per day with **8+ hours** worked
-- **3-day grace** (miss up to 3 days in a row, no penalty)
-- **2 shields max**: earn at 7 and 60 streak days; regen every 60 days after 180-day streak
-- Shields absorb missed days past grace
-- Out of protection → **−50% streak immediately**, then **−50% every 7 days** of continued absence
-- Shields displayed as 🛡 next to streak count
+## Supabase
 
-### Week view
-- Prev/next week navigation
-- Totals, % of goal, goals-done (X/7)
-- Per-day bar chart (hit/miss colors)
-- Per-project weekly breakdown
+- Project: `qmaxsioyostzihksusef` at supabase.com
+- Keys in `.env.local` (gitignored; also set as GitHub repo secrets)
+- Schema: see `SUPABASE_SETUP.md`. Tables: `profiles`, `stats`, `friendships`. RLS enabled.
+- "Confirm email" for signups is **OFF** (OTP flow handles verification)
+- Magic Link email template customized to show OTP code (no link)
 
-### Money tab (personal only)
-- Monthly goal (editable per month)
-- Log earnings (amount + source + optional note)
-- Range selector: This month / Last month / Quarter / Year / All
-- By-source breakdown
-- Currency symbol configurable ($ / € / £ / ¥ / EGP …)
+## Key features shipped
 
-### Settings
-- Theme (Blue / Neutral / Violet / Teal — subtle tint over glass)
-- Show timer in menubar toggle
-- Launch at login (autostart plugin)
-- Notifications toggle (break end, session complete, goal hit, rank up, idle pause)
-- Auto-pause idle threshold (5 / 10 / 15 min)
-- Currency symbol
-- Export Earnings CSV / Sessions CSV
-- Sync info (iCloud Drive)
-
-### UX polish
-- Liquid-glass vibrancy (`HudWindow` NSVisualEffectView)
-- Menubar timer ticks via Rust thread (works even when popover is hidden)
-- ⌘⌥T / ⌘⌥D global shortcut
+- Count-up timer with per-project tracking
+- Locked daily goal (4–24h, can't be lowered)
+- Ranks: 11 tiers × 3 divisions for Wood–Master; GM is single 500-FP window; Challenger unlimited
+- FP math: +6/hr (first 10), +8/hr overtime (if goal > 10), −3/hr penalty on past missed days, clamped at [4, 10] hour window
+- Streaks: 3-day grace + 2 earnable shields (#1 at 7 days, #2 at 60, regen every 60 after 180) + graceful 50% decay
+- FP decay at GM+ only: −10/day while streak is in decay
+- Break timer with duration picker (5/10/15/20)
+- Breaks row in summary (live-ticking)
+- Idle detection: 10-min notification warning, 13-min auto-pause with trimmed time
+- Midnight rollover: splits active session at 00:00, counter continues
+- Money tab (personal only) — monthly goal + earnings + ranges (this month / last / quarter / year / all) + CSV export
+- iCloud Drive sync across Macs (`Forge/data.json`); Documents/Forge on Win/Linux
+- Supabase ladder: Friends tab (with friend code + add/accept/reject), Global top 50, realtime friend activity (`▶ working on X · 1h 22m`), "+ Add" on global rows
+- Themes: Blue / Neutral / Violet / Teal (as dropdown with color emojis)
+- Custom rank icons (SVG, all 11 tiers)
+- Custom "F" forged-metal app icon (in Dock + Finder)
+- Clean monochrome F menubar icon (template-mode, adapts to light/dark menubar)
+- Global shortcut `⌘⌥F` to toggle popover
 - Auto-hide popover on focus lost
-- Real rank icon in modal header, all ranks grid with current highlighted
-- Streak info tooltip + dedicated modal section
+- Menubar timer driven by Rust thread (keeps counting when popover is hidden)
+- Account card with editable display name + copyable friend code + red Sign out button
+- Cross-platform: macOS-only deps (window-vibrancy) isolated via `#[target.'cfg(target_os = "macos")']`
 
-## Ladder tab (placeholder — needs Supabase)
+## Pending / open items for the next session
 
-UI shell with Friends / Global sub-tabs and a "Sign in to compete" card. Nothing functional yet.
+1. **Auto-updater** — add Tauri's updater plugin so installed users get "Update available" prompts automatically. Uses Tauri's own signing key (no Apple fee). ~1 hour.
+2. **Apple Developer signing** ($99/year, whenever Mohab's ready). Kills all "unverified developer" / "damaged" warnings on Macs. Plugs into the existing GH Actions workflow with a signing cert + notarytool. ~30 min once certs are set up.
+3. **Money on the ladder?** Unresolved design question. Currently Money is local-only and private. Mohab was asking if he wants friends to see money stats on the ladder. Options A–D were discussed — no decision made yet.
+4. **Monetization model** — freemium with a Pro tier (Money + CSV + themes + ladder cosmetics) for $4–8/month, or one-time $20–30. Not urgent; ship to friends first, observe demand.
+5. **Data migration from ForgeDev folder** — if ever Mohab wants to pull projects/sessions from the old `ForgeDev/` iCloud folder into the new `Forge/` folder. One-shot script.
+6. **Node 20 → 24 deprecation** — GitHub Actions warning. Not urgent until Sept 2026.
 
-## Pending / agreed but not built
+## Gotchas / things to remember
 
-1. **Supabase leaderboard** — needs the user to create a free Supabase project and hand me the URL + anon key. Then I wire:
-   - Auth (magic link email)
-   - `profiles` table (display_name, friend_code)
-   - `stats` table (tier, division, lp, streak, is_working, current_project)
-   - `friendships` table
-   - Real-time subscription to friends' stats
-   - Global leaderboard (opt-in)
-   - Live "▶ working on X · 1h22" indicator
-2. **GitHub repo + releases** — publish code, auto-build with GH Actions, auto-updater (Tauri updater plugin).
-3. **Windows + Linux port** — branch the macOS-only code (vibrancy, iCloud path, activation policy), test on both OSes.
-4. **Light theme / auto-match system appearance**.
-5. **Achievements / badges** — optional gamification beyond LP.
+- `.env.local` is gitignored. Don't accidentally commit Supabase keys (even though they're "publishable" = client-safe).
+- When bumping versions, update **all three** spots: `tauri.conf.json`, `package.json`, `src-tauri/Cargo.toml`.
+- Tag-pushing triggers GH Actions. Don't push a tag without bumping the version first or you'll get a duplicate release error.
+- `window-vibrancy` is in `[target.'cfg(target_os = "macos")'.dependencies]` — NOT in the main `[dependencies]`. Don't move it or Windows/Linux builds break.
+- Sometimes the Mac DMG bundling step fails locally with a file-lock error — the `.app` is fine, just can't package to `.dmg`. Rerun the build if needed.
 
-## Data model (JSON blob)
+## GitHub auth
 
-```ts
-{
-  version: 1,
-  projects: Project[],          // global, persistent
-  days: Record<dateKey, DayData>,
-  settings: Settings,
-  currentTimer: { projectId, startedAtMs } | null,
-  earnings: Earning[],
-  monthlyGoals: Record<monthKey, centsGoal>,
-  seasons: Record<year, SeasonSnapshot>,
-  updatedMs, updatedBy (device id)
-}
+Mohab's `gh` CLI is authenticated as `mohabmarwan72` with `workflow` scope. No need to re-login.
 
-DayData = {
-  date,
-  goalHours: number,             // LOCKED once set
-  allocations: { projectId, hours }[],
-  sessions: Session[],
-  carryOverHours: number         // always 0, retained for back-compat
-}
-```
+## Fastest way to resume work
 
-## Known quirks
-
-- Unsigned app — first launch shows macOS "unverified developer" warning. Right-click → Open once.
-- iCloud sync is 5-second polling; concurrent edits on two Macs can conflict (last-write-wins).
-- Challenger rank icon uses an iridescent palette but visually similar to Master/Diamond — could benefit from a distinct shape.
-
-## Next-session starting points
-
-- If user wants Supabase wired: ask them to create a project at supabase.com (2 min) and share URL + anon key. Then scaffold auth + stats sync.
-- If user wants to publish: set up GitHub repo, write `.github/workflows/release.yml` for `macos-latest`, add Tauri updater plugin.
-- If user wants light theme: add a theme toggle in Settings that flips CSS variables + vibrancy material.
+In a future Claude session, just say: *"Forge — let's do X"*. Claude should:
+1. Read `NOTES.md` here and memory entry for Forge.
+2. `cd /Users/mohabmarwan/Documents/forge-public`
+3. Work directly in this project. Don't touch `hour-tracker` or `hour-tracker-dev` folders.
