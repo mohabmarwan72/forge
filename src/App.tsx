@@ -355,6 +355,70 @@ function App() {
     };
   }, [settings.notifications]);
 
+  // Midnight rollover — split an active session at 00:00 and start a new day.
+  const prevTodayRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!loaded) return;
+    const prev = prevTodayRef.current;
+    prevTodayRef.current = today;
+    if (prev === null || prev === today) return;
+
+    // Day changed. Compute midnight of today (real local midnight).
+    const midnight = new Date();
+    midnight.setHours(0, 0, 0, 0);
+    const midnightMs = midnight.getTime();
+
+    (async () => {
+      const activeTimer = timerRef.current;
+      if (activeTimer && activeTimer.startedAtMs < midnightMs) {
+        // Save pre-midnight portion to yesterday
+        const yesterdaySession: Session = {
+          id: uid(),
+          projectId: activeTimer.projectId,
+          startMs: activeTimer.startedAtMs,
+          endMs: midnightMs - 1,
+          source: "timer",
+        };
+        const prevKey = prev;
+        setDays((current) => {
+          const prevDay =
+            current[prevKey] ?? emptyDay(prevKey, projects);
+          const updated = {
+            ...current,
+            [prevKey]: {
+              ...prevDay,
+              sessions: [...prevDay.sessions, yesterdaySession],
+            },
+          };
+          void saveDays(updated);
+          return updated;
+        });
+
+        // Restart timer at midnight so the counter visually continues
+        const newTimer = {
+          projectId: activeTimer.projectId,
+          startedAtMs: midnightMs,
+        };
+        setTimer(newTimer);
+        await saveCurrentTimer(newTimer);
+      }
+
+      // Ensure today's day exists (so the "Set your goal" card shows)
+      setDays((current) => {
+        if (current[today]) return current;
+        const updated = { ...current, [today]: emptyDay(today, projects) };
+        void saveDays(updated);
+        return updated;
+      });
+
+      void notify(
+        "New day 🌅",
+        "Lock in today's goal to start earning FP. Your timer's still running.",
+        settings.notifications,
+      );
+    })();
+  }, [today, loaded, projects, settings.notifications]);
+
   // Sync autostart setting with OS
   useEffect(() => {
     if (!loaded) return;
