@@ -36,6 +36,7 @@ import {
   saveMonthlyGoals,
   saveSeasons,
   pollRemoteChanges,
+  onRemoteOverride,
 } from "./storage";
 import { RankIcon } from "./RankIcon";
 import type {
@@ -263,11 +264,16 @@ function App() {
     })();
   }, []);
 
-  useEffect(() => {
-    if (!loaded) return;
-    const id = setInterval(async () => {
-      const fresh = await pollRemoteChanges();
-      if (!fresh) return;
+  const applyFreshBlob = useCallback(
+    (fresh: {
+      projects: Project[];
+      days: Record<string, DayData>;
+      settings: Settings;
+      currentTimer: CurrentTimer;
+      earnings: Earning[];
+      monthlyGoals: Record<string, number>;
+      seasons: Record<string, SeasonSnapshot>;
+    }) => {
       const withToday = ensureToday(fresh.days, today, fresh.projects);
       setProjects(fresh.projects);
       setDays(withToday);
@@ -285,9 +291,29 @@ function App() {
       setEarnings(fresh.earnings ?? []);
       setMonthlyGoals(fresh.monthlyGoals ?? {});
       setSeasons(fresh.seasons ?? {});
-    }, 5000);
-    return () => clearInterval(id);
-  }, [loaded, today]);
+    },
+    [today],
+  );
+
+  useEffect(() => {
+    if (!loaded) return;
+    const pollNow = async () => {
+      const fresh = await pollRemoteChanges();
+      if (fresh) applyFreshBlob(fresh);
+    };
+    const id = setInterval(pollNow, 5000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void pollNow();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", pollNow);
+    onRemoteOverride((fresh) => applyFreshBlob(fresh));
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", pollNow);
+    };
+  }, [loaded, applyFreshBlob]);
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);

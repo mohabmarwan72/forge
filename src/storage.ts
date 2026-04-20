@@ -12,7 +12,7 @@ import {
   initSync,
   readBlob,
   thisDevice,
-  writeBlob,
+  writeBlobIfNotStale,
   type SyncBlob,
 } from "./sync";
 
@@ -29,6 +29,11 @@ async function getLegacyStore(): Promise<Store> {
 
 let cache: SyncBlob | null = null;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
+let remoteOverrideCallback: ((blob: SyncBlob) => void) | null = null;
+
+export function onRemoteOverride(cb: (blob: SyncBlob) => void) {
+  remoteOverrideCallback = cb;
+}
 
 async function ensureLoaded(): Promise<SyncBlob> {
   if (cache) return cache;
@@ -41,7 +46,13 @@ function scheduleSave() {
   saveTimer = setTimeout(async () => {
     if (!cache) return;
     try {
-      cache = await writeBlob(cache);
+      const result = await writeBlobIfNotStale(cache, cache.updatedMs);
+      if (result.kind === "stale") {
+        cache = result.freshBlob;
+        remoteOverrideCallback?.(result.freshBlob);
+      } else {
+        cache = result.blob;
+      }
     } catch (err) {
       console.error("writeBlob failed", err);
     }

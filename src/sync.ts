@@ -149,6 +149,47 @@ export async function writeBlob(
   return full;
 }
 
+export type WriteResult =
+  | { kind: "written"; blob: SyncBlob }
+  | { kind: "stale"; freshBlob: SyncBlob };
+
+/**
+ * Write guarded against stale overwrite. If the cloud file was updated by a
+ * different device more recently than expectedPrevUpdatedMs, skip the write
+ * and return the fresh blob so the caller can adopt it instead of clobbering
+ * real data with an out-of-date local copy.
+ */
+export async function writeBlobIfNotStale(
+  blob: Omit<SyncBlob, "version" | "updatedMs" | "updatedBy">,
+  expectedPrevUpdatedMs: number,
+): Promise<WriteResult> {
+  await ensureDir();
+  const me = deviceId();
+  const fresh = await readBlob();
+  if (
+    fresh &&
+    fresh.updatedBy !== me &&
+    fresh.updatedMs > expectedPrevUpdatedMs + 500
+  ) {
+    return { kind: "stale", freshBlob: fresh };
+  }
+  const full: SyncBlob = {
+    version: 1,
+    projects: blob.projects,
+    days: blob.days,
+    settings: blob.settings,
+    currentTimer: blob.currentTimer,
+    earnings: blob.earnings ?? [],
+    monthlyGoals: blob.monthlyGoals ?? {},
+    seasons: blob.seasons ?? {},
+    updatedMs: Date.now(),
+    updatedBy: me,
+  };
+  const file = await syncFilePath();
+  await writeTextFile(file, JSON.stringify(full, null, 2));
+  return { kind: "written", blob: full };
+}
+
 export async function fileMtime(): Promise<number | null> {
   try {
     const file = await syncFilePath();
