@@ -1,6 +1,6 @@
 # Forge — Project State
 
-*Last saved: 2026-04-16*
+*Last saved: 2026-04-28*
 
 A menubar hour-tracker with a ranked ladder. Compete with friends on LP, streaks, hours. Liquid-glass UI, Supabase-powered real-time leaderboard, iCloud sync between your own Macs.
 
@@ -51,13 +51,21 @@ git tag v0.2.4 && git push --tags
 
 **Repo secrets** already set: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`. Don't need to touch again.
 
-## Current shipped version: v0.2.3
+## Current shipped version: v0.2.5
 
 Latest confirmed:
-- macOS ✅ (auto-built, on releases page for v0.2.2; v0.2.3 is the latest)
-- Windows ✅ (auto-built)
-- Linux ✅ (auto-built in v0.2.3 after libxss-dev fix)
+- macOS ✅ (auto-built per OS via GH Actions on tag push)
+- Windows ✅
+- Linux ✅
 - Personal DMG ✅ (on Mohab's Desktop)
+
+**v0.2.5 sync fix (2026-04-28):** writeBlobIfNotStale rewritten to merge
+local cache with on-disk version (union of sessions/earnings/days by id)
+instead of replacing. Adds rolling backups (data.bakN.json × 10) in the
+iCloud folder. Cold launch now waits ~3s for iCloud to deliver newer
+remote versions before accepting writes. Triggered by an Apr 27 incident
+where 4h of work was lost when a lagged Mac wrote stale data over the
+fresh cloud copy and iCloud propagated the bad version to the other Mac.
 
 ## Supabase
 
