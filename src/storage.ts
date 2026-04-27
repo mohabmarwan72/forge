@@ -12,6 +12,7 @@ import {
   initSync,
   readBlob,
   thisDevice,
+  waitForFreshRemote,
   writeBlobIfNotStale,
   type SyncBlob,
 } from "./sync";
@@ -38,6 +39,12 @@ export function onRemoteOverride(cb: (blob: SyncBlob) => void) {
 async function ensureLoaded(): Promise<SyncBlob> {
   if (cache) return cache;
   cache = await initSync();
+  // Give iCloud a brief window to deliver a newer remote version before we
+  // start accepting writes. Without this, a cold launch with a stale local
+  // file (placeholder, slow OneDrive download, etc.) lets the first write
+  // clobber the cloud copy.
+  const fresher = await waitForFreshRemote(cache.updatedMs, 3000);
+  if (fresher) cache = fresher;
   return cache;
 }
 
@@ -47,12 +54,14 @@ function scheduleSave() {
     if (!cache) return;
     try {
       const result = await writeBlobIfNotStale(cache, cache.updatedMs);
-      if (result.kind === "stale") {
-        cache = result.freshBlob;
-        remoteOverrideCallback?.(result.freshBlob);
-      } else {
-        cache = result.blob;
-      }
+      // The merged blob may now contain sessions/days we didn't have locally
+      // (because the remote had work from another device). Adopt it back into
+      // the cache so the UI sees the union, not just our local view.
+      const adoptedNew =
+        result.blob.updatedMs !== cache.updatedMs &&
+        JSON.stringify(result.blob.days) !== JSON.stringify(cache.days);
+      cache = result.blob;
+      if (adoptedNew) remoteOverrideCallback?.(result.blob);
     } catch (err) {
       console.error("writeBlob failed", err);
     }
