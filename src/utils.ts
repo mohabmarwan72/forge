@@ -95,6 +95,13 @@ export function uid(): string {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
 
+// Deterministic id for sessions that originate from a running timer. Two Macs
+// that flush the same in-progress timer will produce the same id, so the sync
+// dedupe can collapse them instead of double-counting the same work window.
+export function timerSessionId(projectId: string, startedAtMs: number): string {
+  return `timer-${projectId}-${startedAtMs}`;
+}
+
 export function formatDateHeader(dateKey: string): string {
   const [y, m, d] = dateKey.split("-").map(Number);
   const date = new Date(y, m - 1, d);
@@ -109,8 +116,7 @@ export function startOfWeek(dateKey: string): string {
   const [y, m, d] = dateKey.split("-").map(Number);
   const date = new Date(y, m - 1, d);
   const dow = date.getDay();
-  const diff = dow === 0 ? -6 : 1 - dow;
-  date.setDate(date.getDate() + diff);
+  date.setDate(date.getDate() - dow);
   return todayKey(date);
 }
 
@@ -133,8 +139,9 @@ export const LP_DECAY_PER_DAY_GM = 10;
 export function computeStreak(
   days: Record<string, DayData>,
   todayKey: string,
+  streakOffset: number = 0,
 ): number {
-  return computeStreakState(days, todayKey).streak;
+  return computeStreakState(days, todayKey, streakOffset).streak;
 }
 
 export type StreakState = {
@@ -157,6 +164,7 @@ export type StreakState = {
 export function computeStreakState(
   days: Record<string, DayData>,
   todayKey: string,
+  streakOffset: number = 0,
 ): StreakState {
   const sortedKeys = Object.keys(days).sort();
   const earliestKey = sortedKeys[0];
@@ -178,7 +186,8 @@ export function computeStreakState(
 
   const hit = (key: string) => {
     const d = days[key];
-    return d ? daySpentMs(d) >= STREAK_THRESHOLD_MS : false;
+    if (!d) return false;
+    return daySpentMs(d) + dayBreakMs(d) >= STREAK_THRESHOLD_MS;
   };
 
   let date = earliestKey;
@@ -225,7 +234,7 @@ export function computeStreakState(
   }
 
   return {
-    streak,
+    streak: streak + streakOffset,
     shields,
     inDecay: shielelessMisses > 0,
     decayDays: shielelessMisses,

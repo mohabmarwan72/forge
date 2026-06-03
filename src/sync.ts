@@ -29,6 +29,10 @@ export type SyncBlob = {
   days: Record<string, DayData>;
   settings: Settings;
   currentTimer: CurrentTimer;
+  // Wall-clock time of the last write that set or cleared currentTimer. Used
+  // by mergeBlobs so a deliberate "stop" (currentTimer=null) on one Mac is
+  // never resurrected by a stale running timer on the other side.
+  currentTimerUpdatedMs: number;
   earnings: Earning[];
   monthlyGoals: Record<string, number>;
   seasons: Record<string, SeasonSnapshot>;
@@ -118,6 +122,7 @@ export async function readBlob(): Promise<SyncBlob | null> {
         days,
         settings: parsed.settings,
         currentTimer: parsed.currentTimer ?? null,
+        currentTimerUpdatedMs: parsed.currentTimerUpdatedMs ?? 0,
         earnings: parsed.earnings ?? [],
         monthlyGoals: parsed.monthlyGoals ?? {},
         seasons: parsed.seasons ?? {},
@@ -139,6 +144,29 @@ function dedupeById<T extends { id: string }>(local: T[], remote: T[]): T[] {
   return Array.from(map.values());
 }
 
+// Two devices that flush the same in-progress timer produce sessions with the
+// same deterministic id (see timerSessionId). When that happens, prefer the
+// earlier endMs — that's the Mac where the user actually pressed stop; a
+// later endMs is a stale clone that kept ticking after the timer should have
+// died.
+//
+// Legacy data written before deterministic ids has random ids on duplicates,
+// so we ALSO group by (projectId, startMs) for timer-source sessions. That
+// way old duplicates still collapse on the next sync after the fix lands.
+function mergeSessions(local: Session[], remote: Session[]): Session[] {
+  const map = new Map<string, Session>();
+  const keyFor = (s: Session) =>
+    s.source === "timer" ? `t:${s.projectId}:${s.startMs}` : `i:${s.id}`;
+  const put = (s: Session) => {
+    const k = keyFor(s);
+    const existing = map.get(k);
+    if (!existing || s.endMs < existing.endMs) map.set(k, s);
+  };
+  for (const r of remote) put(r);
+  for (const l of local) put(l);
+  return Array.from(map.values());
+}
+
 function mergeBreaks(local: BreakLog[], remote: BreakLog[]): BreakLog[] {
   const key = (b: BreakLog) => `${b.startMs}-${b.endMs}`;
   const map = new Map<string, BreakLog>();
@@ -152,10 +180,7 @@ function mergeDay(local: DayData, remote: DayData): DayData {
     date: local.date,
     goalHours: Math.max(local.goalHours ?? 0, remote.goalHours ?? 0),
     allocations: local.allocations ?? remote.allocations ?? [],
-    sessions: dedupeById<Session>(
-      local.sessions ?? [],
-      remote.sessions ?? [],
-    ),
+    sessions: mergeSessions(local.sessions ?? [], remote.sessions ?? []),
     breaks: mergeBreaks(local.breaks ?? [], remote.breaks ?? []),
     carryOverHours: Math.max(
       local.carryOverHours ?? 0,
@@ -180,18 +205,24 @@ function mergeDays(
 /**
  * Combine local in-memory state with a remote on-disk blob without ever
  * deleting data that exists on either side. The local writer's intent wins
- * for scalar metadata (settings, currentTimer, monthlyGoals); arrays of
- * tracked work (sessions, earnings, breaks, days) are unioned by id.
+ * for scalar metadata (settings, monthlyGoals); arrays of tracked work
+ * (sessions, earnings, breaks, days) are unioned by id. currentTimer is
+ * resolved by which side recorded its set/clear most recently — so a stop
+ * on one Mac is not undone by a stale running timer on the other.
  */
 export function mergeBlobs(
   local: Omit<SyncBlob, "version" | "updatedMs" | "updatedBy">,
   remote: SyncBlob,
 ): Omit<SyncBlob, "version" | "updatedMs" | "updatedBy"> {
+  const localTimerMs = local.currentTimerUpdatedMs ?? 0;
+  const remoteTimerMs = remote.currentTimerUpdatedMs ?? 0;
+  const localTimerWins = localTimerMs >= remoteTimerMs;
   return {
     projects: dedupeById<Project>(local.projects, remote.projects),
     days: mergeDays(local.days, remote.days ?? {}),
     settings: local.settings ?? remote.settings,
-    currentTimer: local.currentTimer ?? remote.currentTimer,
+    currentTimer: localTimerWins ? local.currentTimer : remote.currentTimer,
+    currentTimerUpdatedMs: localTimerWins ? localTimerMs : remoteTimerMs,
     earnings: dedupeById<Earning>(
       local.earnings ?? [],
       remote.earnings ?? [],
@@ -199,6 +230,21 @@ export function mergeBlobs(
     monthlyGoals: { ...(remote.monthlyGoals ?? {}), ...(local.monthlyGoals ?? {}) },
     seasons: { ...(remote.seasons ?? {}), ...(local.seasons ?? {}) },
   };
+}
+
+// lastHeartbeatMs is a local-only signal — it tells *this* device whether the
+// app crashed mid-session (gap >> heartbeat interval). The other Mac always
+// sees a stale heartbeat (iCloud only updates on Save), so if we left the
+// field in iCloud the other Mac's startup-recovery would chop a still-live
+// timer down to the last Saved heartbeat. Strip it when serializing to
+// iCloud.
+function stripHeartbeat(timer: CurrentTimer): CurrentTimer {
+  if (!timer) return timer;
+  return { projectId: timer.projectId, startedAtMs: timer.startedAtMs };
+}
+
+function forICloud(full: SyncBlob): SyncBlob {
+  return { ...full, currentTimer: stripHeartbeat(full.currentTimer) };
 }
 
 async function writeBackup(serialized: string): Promise<void> {
@@ -223,6 +269,7 @@ export async function writeBlob(
     days: blob.days,
     settings: blob.settings,
     currentTimer: blob.currentTimer,
+    currentTimerUpdatedMs: blob.currentTimerUpdatedMs ?? 0,
     earnings: blob.earnings ?? [],
     monthlyGoals: blob.monthlyGoals ?? {},
     seasons: blob.seasons ?? {},
@@ -230,7 +277,7 @@ export async function writeBlob(
     updatedBy: deviceId(),
   };
   const file = await syncFilePath();
-  const serialized = JSON.stringify(full, null, 2);
+  const serialized = JSON.stringify(forICloud(full), null, 2);
   await writeTextFile(file, serialized);
   await writeBackup(serialized);
   return full;
@@ -261,6 +308,7 @@ export async function writeBlobIfNotStale(
     days: merged.days,
     settings: merged.settings,
     currentTimer: merged.currentTimer,
+    currentTimerUpdatedMs: merged.currentTimerUpdatedMs ?? 0,
     earnings: merged.earnings ?? [],
     monthlyGoals: merged.monthlyGoals ?? {},
     seasons: merged.seasons ?? {},
@@ -268,7 +316,7 @@ export async function writeBlobIfNotStale(
     updatedBy: me,
   };
   const file = await syncFilePath();
-  const serialized = JSON.stringify(full, null, 2);
+  const serialized = JSON.stringify(forICloud(full), null, 2);
   await writeTextFile(file, serialized);
   await writeBackup(serialized);
   return { kind: "written", blob: full };
@@ -347,6 +395,7 @@ export async function initSync(): Promise<SyncBlob> {
     days: migrated.days,
     settings,
     currentTimer,
+    currentTimerUpdatedMs: currentTimer ? Date.now() : 0,
     earnings: [],
     monthlyGoals: {},
     seasons: {},

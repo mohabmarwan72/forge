@@ -1,4 +1,11 @@
 import { Store } from "@tauri-apps/plugin-store";
+import { appConfigDir, join } from "@tauri-apps/api/path";
+import {
+  exists,
+  mkdir,
+  readTextFile,
+  writeTextFile,
+} from "@tauri-apps/plugin-fs";
 import type {
   CurrentTimer,
   DayData,
@@ -10,14 +17,15 @@ import type {
 import {
   fileMtime as syncFileMtime,
   initSync,
+  mergeBlobs,
   readBlob,
   thisDevice,
-  waitForFreshRemote,
-  writeBlobIfNotStale,
+  writeBlob,
   type SyncBlob,
 } from "./sync";
 
 const LEGACY_STORE_FILE = "hour-tracker.json";
+const LOCAL_CACHE_FILENAME = "forge-local.json";
 
 let legacyStorePromise: Promise<Store> | null = null;
 
@@ -30,21 +38,51 @@ async function getLegacyStore(): Promise<Store> {
 
 let cache: SyncBlob | null = null;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
-let remoteOverrideCallback: ((blob: SyncBlob) => void) | null = null;
 
-export function onRemoteOverride(cb: (blob: SyncBlob) => void) {
-  remoteOverrideCallback = cb;
+// Local cache lives in ~/Library/Application Support/<bundleId>/forge-local.json
+// (NOT iCloud). It's the source of truth on this device. Cross-device data
+// movement only happens when the user presses the Sync button — which calls
+// syncWithCloud() below.
+async function localCachePath(): Promise<string> {
+  const dir = await appConfigDir();
+  return await join(dir, LOCAL_CACHE_FILENAME);
+}
+
+async function readLocalCache(): Promise<SyncBlob | null> {
+  try {
+    const path = await localCachePath();
+    if (!(await exists(path))) return null;
+    const text = await readTextFile(path);
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === "object" && parsed.version === 1) {
+      return parsed as SyncBlob;
+    }
+    return null;
+  } catch (err) {
+    console.error("readLocalCache failed", err);
+    return null;
+  }
+}
+
+async function writeLocalCache(blob: SyncBlob): Promise<void> {
+  const dir = await appConfigDir();
+  if (!(await exists(dir))) await mkdir(dir, { recursive: true });
+  const path = await localCachePath();
+  await writeTextFile(path, JSON.stringify(blob, null, 2));
 }
 
 async function ensureLoaded(): Promise<SyncBlob> {
   if (cache) return cache;
+  const local = await readLocalCache();
+  if (local) {
+    cache = local;
+    return cache;
+  }
+  // No local cache yet — bootstrap from iCloud (or legacy store) on this
+  // device's first launch. Once written locally we never auto-touch iCloud
+  // again; the user has to press the Sync button.
   cache = await initSync();
-  // Give iCloud a brief window to deliver a newer remote version before we
-  // start accepting writes. Without this, a cold launch with a stale local
-  // file (placeholder, slow OneDrive download, etc.) lets the first write
-  // clobber the cloud copy.
-  const fresher = await waitForFreshRemote(cache.updatedMs, 3000);
-  if (fresher) cache = fresher;
+  await writeLocalCache(cache);
   return cache;
 }
 
@@ -53,19 +91,83 @@ function scheduleSave() {
   saveTimer = setTimeout(async () => {
     if (!cache) return;
     try {
-      const result = await writeBlobIfNotStale(cache, cache.updatedMs);
-      // The merged blob may now contain sessions/days we didn't have locally
-      // (because the remote had work from another device). Adopt it back into
-      // the cache so the UI sees the union, not just our local view.
-      const adoptedNew =
-        result.blob.updatedMs !== cache.updatedMs &&
-        JSON.stringify(result.blob.days) !== JSON.stringify(cache.days);
-      cache = result.blob;
-      if (adoptedNew) remoteOverrideCallback?.(result.blob);
+      // Bump updatedMs/updatedBy so the next manual sync recognises this
+      // device as having unsaved changes.
+      cache = {
+        ...cache,
+        updatedMs: Date.now(),
+        updatedBy: thisDevice(),
+      };
+      await writeLocalCache(cache);
     } catch (err) {
-      console.error("writeBlob failed", err);
+      console.error("local save failed", err);
     }
   }, 250);
+}
+
+export type SyncResult =
+  | { kind: "ok"; blob: SyncBlob; pulledFromRemote: boolean }
+  | { kind: "error"; error: string };
+
+/**
+ * Manual cloud sync (invoked from the Save button). Reads the latest iCloud
+ * blob, unions it with the local cache (no deletes — see mergeBlobs), writes
+ * the merged result back to iCloud, and updates the local cache.
+ */
+export async function syncWithCloud(): Promise<SyncResult> {
+  try {
+    const c = await ensureLoaded();
+    const remote = await readBlob();
+    const merged = remote ? mergeBlobs(c, remote) : c;
+    const full = await writeBlob(merged);
+    cache = full;
+    await writeLocalCache(full);
+    return {
+      kind: "ok",
+      blob: full,
+      pulledFromRemote: !!remote && remote.updatedBy !== thisDevice(),
+    };
+  } catch (err) {
+    return { kind: "error", error: String(err) };
+  }
+}
+
+/**
+ * Pull-only (invoked from the Update button). Reads the latest iCloud blob,
+ * unions it with the local cache, writes the merged result to local only.
+ * The cloud file is left untouched, so this is always safe to press.
+ */
+export async function pullFromCloud(): Promise<SyncResult> {
+  try {
+    const c = await ensureLoaded();
+    const remote = await readBlob();
+    if (!remote) {
+      return { kind: "ok", blob: c, pulledFromRemote: false };
+    }
+    const merged = mergeBlobs(c, remote);
+    const full: SyncBlob = {
+      version: 1,
+      projects: merged.projects,
+      days: merged.days,
+      settings: merged.settings,
+      currentTimer: merged.currentTimer,
+      currentTimerUpdatedMs: merged.currentTimerUpdatedMs ?? 0,
+      earnings: merged.earnings ?? [],
+      monthlyGoals: merged.monthlyGoals ?? {},
+      seasons: merged.seasons ?? {},
+      updatedMs: remote.updatedMs,
+      updatedBy: remote.updatedBy,
+    };
+    cache = full;
+    await writeLocalCache(full);
+    return {
+      kind: "ok",
+      blob: full,
+      pulledFromRemote: remote.updatedBy !== thisDevice(),
+    };
+  } catch (err) {
+    return { kind: "error", error: String(err) };
+  }
 }
 
 export async function initStorage(): Promise<SyncBlob> {
@@ -118,7 +220,16 @@ export async function loadCurrentTimer(): Promise<CurrentTimer> {
 
 export async function saveCurrentTimer(timer: CurrentTimer) {
   const c = await ensureLoaded();
+  const prev = c.currentTimer;
   c.currentTimer = timer;
+  // Only bump the timestamp on a real start/stop/switch — not on heartbeat
+  // writes that just refresh lastHeartbeatMs. Otherwise every heartbeat
+  // would win the merge over a real "stop" recorded a moment ago on the
+  // other Mac.
+  const isMeaningfulChange =
+    (prev?.projectId ?? null) !== (timer?.projectId ?? null) ||
+    (prev?.startedAtMs ?? null) !== (timer?.startedAtMs ?? null);
+  if (isMeaningfulChange) c.currentTimerUpdatedMs = Date.now();
   scheduleSave();
 }
 
@@ -249,23 +360,6 @@ export async function loadLegacySettings(): Promise<Settings> {
     idleThresholdMin: stored?.idleThresholdMin ?? 10,
     shareCurrentProject: stored?.shareCurrentProject ?? true,
   };
-}
-
-/**
- * Poll the iCloud file for remote changes. If another device wrote a newer
- * blob, returns it; otherwise returns null.
- */
-export async function pollRemoteChanges(): Promise<SyncBlob | null> {
-  if (!cache) return null;
-  const mtime = await syncFileMtime();
-  if (mtime == null) return null;
-  if (mtime <= cache.updatedMs + 500) return null;
-  const fresh = await readBlob();
-  if (!fresh) return null;
-  if (fresh.updatedBy === thisDevice()) return null;
-  if (fresh.updatedMs <= cache.updatedMs) return null;
-  cache = fresh;
-  return fresh;
 }
 
 export { thisDevice, syncFileMtime };

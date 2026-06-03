@@ -25,7 +25,6 @@ import {
   type Stats as RemoteStats,
 } from "./supabase";
 
-const IS_PERSONAL = import.meta.env.VITE_PERSONAL === "true";
 import {
   initStorage,
   saveProjects,
@@ -35,8 +34,8 @@ import {
   saveEarnings,
   saveMonthlyGoals,
   saveSeasons,
-  pollRemoteChanges,
-  onRemoteOverride,
+  syncWithCloud,
+  pullFromCloud,
 } from "./storage";
 import { RankIcon } from "./RankIcon";
 import type {
@@ -89,11 +88,19 @@ import {
   projectSpentMs,
   RANKS,
   sessionsCompleted,
+  timerSessionId,
   todayKey,
   uid,
   weekKeys,
 } from "./utils";
 import "./App.css";
+
+// Sleep / power-loss / crash recovery: while a timer is running we persist a
+// heartbeat every HEARTBEAT_INTERVAL_MS. If we ever notice that the gap to
+// the last heartbeat exceeds HEARTBEAT_GAP_MS, we treat the missing minutes
+// as not-worked (Mac was asleep, app crashed, battery died).
+const HEARTBEAT_INTERVAL_MS = 30_000;
+const HEARTBEAT_GAP_MS = 90_000;
 
 function emptyDay(date: string, projects: Project[]): DayData {
   return {
@@ -198,6 +205,15 @@ function App() {
   const [loaded, setLoaded] = useState(false);
   const [session, setSession] = useState<SupaSession | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
+  const [syncState, setSyncState] = useState<
+    "idle" | "syncing" | "success" | "error"
+  >("idle");
+  const [lastSyncedMs, setLastSyncedMs] = useState<number | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [pullState, setPullState] = useState<
+    "idle" | "syncing" | "success" | "error"
+  >("idle");
+  const [pullError, setPullError] = useState<string | null>(null);
 
   // Bootstrap Supabase session + subscribe to auth changes
   useEffect(() => {
@@ -251,16 +267,59 @@ function App() {
         blob.days,
         today,
       );
+
+      // Sleep / power-loss / crash recovery. If the persisted timer's last
+      // heartbeat is older than the slack window, the missing minutes weren't
+      // work — save the portion up to the last heartbeat and stop the timer.
+      let restoredTimer = blob.currentTimer ?? null;
+      let restoredDays = withToday;
+      let recoveredGapMin = 0;
+      if (restoredTimer && restoredTimer.lastHeartbeatMs) {
+        const gap = Date.now() - restoredTimer.lastHeartbeatMs;
+        if (gap > HEARTBEAT_GAP_MS) {
+          const endAt = restoredTimer.lastHeartbeatMs;
+          if (endAt - restoredTimer.startedAtMs >= 1000) {
+            const dayKey = todayKey(new Date(restoredTimer.startedAtMs));
+            const recoveredSession: Session = {
+              id: timerSessionId(restoredTimer.projectId, restoredTimer.startedAtMs),
+              projectId: restoredTimer.projectId,
+              startMs: restoredTimer.startedAtMs,
+              endMs: endAt,
+              source: "timer",
+            };
+            const targetDay =
+              restoredDays[dayKey] ?? emptyDay(dayKey, blob.projects);
+            restoredDays = {
+              ...restoredDays,
+              [dayKey]: {
+                ...targetDay,
+                sessions: [...targetDay.sessions, recoveredSession],
+              },
+            };
+          }
+          restoredTimer = null;
+          recoveredGapMin = Math.round(gap / 60000);
+          await saveCurrentTimer(null);
+        }
+      }
+
       setProjects(blob.projects);
-      setDays(withToday);
+      setDays(restoredDays);
       setSettings(settings);
-      setTimer(blob.currentTimer ?? null);
+      setTimer(restoredTimer);
       setEarnings(blob.earnings ?? []);
       setMonthlyGoals(blob.monthlyGoals ?? {});
       setSeasons(nextSeasons);
       setLoaded(true);
-      if (withToday !== blob.days) await saveDays(withToday);
+      if (restoredDays !== blob.days) await saveDays(restoredDays);
       if (nextSeasons !== (blob.seasons ?? {})) await saveSeasons(nextSeasons);
+      if (recoveredGapMin > 0) {
+        void notify(
+          "Forge paused — you were away",
+          `Mac was asleep / off for ~${recoveredGapMin} min. Those minutes weren't counted.`,
+          settings.notifications,
+        );
+      }
     })();
   }, []);
 
@@ -295,30 +354,80 @@ function App() {
     [today],
   );
 
-  useEffect(() => {
-    if (!loaded) return;
-    const pollNow = async () => {
-      const fresh = await pollRemoteChanges();
-      if (fresh) applyFreshBlob(fresh);
-    };
-    const id = setInterval(pollNow, 5000);
-    const onVisible = () => {
-      if (document.visibilityState === "visible") void pollNow();
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    window.addEventListener("focus", pollNow);
-    onRemoteOverride((fresh) => applyFreshBlob(fresh));
-    return () => {
-      clearInterval(id);
-      document.removeEventListener("visibilitychange", onVisible);
-      window.removeEventListener("focus", pollNow);
-    };
-  }, [loaded, applyFreshBlob]);
+  const runSync = useCallback(async () => {
+    setSyncState("syncing");
+    setSyncError(null);
+    const result = await syncWithCloud();
+    if (result.kind === "ok") {
+      applyFreshBlob(result.blob);
+      setLastSyncedMs(result.blob.updatedMs);
+      setSyncState("success");
+      window.setTimeout(() => {
+        setSyncState((s) => (s === "success" ? "idle" : s));
+      }, 1800);
+    } else {
+      setSyncError(result.error);
+      setSyncState("error");
+    }
+  }, [applyFreshBlob]);
+
+  const runPull = useCallback(async () => {
+    setPullState("syncing");
+    setPullError(null);
+    const result = await pullFromCloud();
+    if (result.kind === "ok") {
+      applyFreshBlob(result.blob);
+      setPullState("success");
+      window.setTimeout(() => {
+        setPullState((s) => (s === "success" ? "idle" : s));
+      }, 1800);
+    } else {
+      setPullError(result.error);
+      setPullState("error");
+    }
+  }, [applyFreshBlob]);
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
+
+  // Heartbeat writer — while a timer is running, persist `lastHeartbeatMs`
+  // every HEARTBEAT_INTERVAL_MS so a future cold start can detect crashes.
+  const lastHeartbeatRef = useRef<number>(0);
+  useEffect(() => {
+    if (!timer) {
+      lastHeartbeatRef.current = 0;
+      return;
+    }
+    lastHeartbeatRef.current = Date.now();
+    void saveCurrentTimer({ ...timer, lastHeartbeatMs: lastHeartbeatRef.current });
+    const id = setInterval(() => {
+      lastHeartbeatRef.current = Date.now();
+      void saveCurrentTimer({
+        ...timer,
+        lastHeartbeatMs: lastHeartbeatRef.current,
+      });
+    }, HEARTBEAT_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [timer?.projectId, timer?.startedAtMs]);
+
+  // Watchdog — piggybacks on the 1s `now` tick. If wall-clock has jumped far
+  // ahead of the last heartbeat, the Mac slept (or the app froze). Trim the
+  // session to the last heartbeat and notify, mirroring idle-pause UX.
+  useEffect(() => {
+    if (!timer || !lastHeartbeatRef.current) return;
+    const gap = Date.now() - lastHeartbeatRef.current;
+    if (gap <= HEARTBEAT_GAP_MS) return;
+    const endAt = lastHeartbeatRef.current;
+    const minutes = Math.round(gap / 60000);
+    void flushTimerRef.current(endAt);
+    void notify(
+      "Forge paused — you were away",
+      `Mac was asleep / off for ~${minutes} min. Those minutes weren't counted.`,
+      settings.notifications,
+    );
+  }, [now, timer, settings.notifications]);
 
   useEffect(() => {
     if (!loaded) return;
@@ -399,7 +508,7 @@ function App() {
       if (activeTimer && activeTimer.startedAtMs < midnightMs) {
         // Save pre-midnight portion to yesterday
         const yesterdaySession: Session = {
-          id: uid(),
+          id: timerSessionId(activeTimer.projectId, activeTimer.startedAtMs),
           projectId: activeTimer.projectId,
           startMs: activeTimer.startedAtMs,
           endMs: midnightMs - 1,
@@ -426,7 +535,7 @@ function App() {
           startedAtMs: midnightMs,
         };
         setTimer(newTimer);
-        await saveCurrentTimer(newTimer);
+        await saveCurrentTimer({ ...newTimer, lastHeartbeatMs: Date.now() });
       }
 
       // Ensure today's day exists (so the "Set your goal" card shows)
@@ -464,9 +573,13 @@ function App() {
   // Sync FP / rank / streak / live activity to Supabase
   const syncStats = useCallback(async () => {
     if (!session?.user || !profile || !loaded) return;
-    const streakState = computeStreakState(days, today);
     const currentYear = new Date().getFullYear();
     const currentSeason = seasons[String(currentYear)];
+    const streakState = computeStreakState(
+      days,
+      today,
+      currentSeason?.streakOffset ?? 0,
+    );
     const earnedLP = computeSeasonalLP(
       days,
       today,
@@ -658,9 +771,10 @@ function App() {
   const startTimer = async (projectId: string) => {
     if (timer && timer.projectId === projectId) return;
     if (timer) await flushTimer(timer);
-    const t = { projectId, startedAtMs: Date.now() };
+    const startedAtMs = Date.now();
+    const t = { projectId, startedAtMs };
     setTimer(t);
-    await saveCurrentTimer(t);
+    await saveCurrentTimer({ ...t, lastHeartbeatMs: startedAtMs });
   };
 
   const flushTimer = async (t: CurrentTimer, endMsOverride?: number) => {
@@ -668,7 +782,7 @@ function App() {
     const endMs = endMsOverride ?? Date.now();
     if (endMs - t.startedAtMs < 1000) return;
     const session: Session = {
-      id: uid(),
+      id: timerSessionId(t.projectId, t.startedAtMs),
       projectId: t.projectId,
       startMs: t.startedAtMs,
       endMs,
@@ -794,9 +908,23 @@ function App() {
         <div className="title-left" data-tauri-drag-region>
           Forge
         </div>
-        <button className="close-btn" onClick={hideWindow} aria-label="Close">
-          ×
-        </button>
+        <div className="title-right">
+          <PullButton
+            state={pullState}
+            error={pullError}
+            onClick={runPull}
+          />
+          <SyncButton
+            state={syncState}
+            lastSyncedMs={lastSyncedMs}
+            error={syncError}
+            now={now}
+            onClick={runSync}
+          />
+          <button className="close-btn" onClick={hideWindow} aria-label="Close">
+            ×
+          </button>
+        </div>
       </div>
 
       <nav className="tabs">
@@ -818,14 +946,12 @@ function App() {
         >
           Ladder
         </button>
-        {IS_PERSONAL && (
-          <button
-            className={tab === "money" ? "tab active" : "tab"}
-            onClick={() => setTab("money")}
-          >
-            Money
-          </button>
-        )}
+        <button
+          className={tab === "money" ? "tab active" : "tab"}
+          onClick={() => setTab("money")}
+        >
+          Money
+        </button>
         <button
           className={`tab tab-icon ${tab === "settings" ? "active" : ""}`}
           onClick={() => setTab("settings")}
@@ -870,7 +996,7 @@ function App() {
             nowTick={now}
           />
         )}
-        {tab === "money" && IS_PERSONAL && (
+        {tab === "money" && (
           <MoneyView
             earnings={earnings}
             monthlyGoals={monthlyGoals}
@@ -895,6 +1021,67 @@ function App() {
         )}
       </div>
     </div>
+  );
+}
+
+function PullButton(props: {
+  state: "idle" | "syncing" | "success" | "error";
+  error: string | null;
+  onClick: () => void;
+}) {
+  const { state, error, onClick } = props;
+  const label =
+    state === "syncing"
+      ? "Updating…"
+      : state === "success"
+        ? "Updated"
+        : state === "error"
+          ? "Retry"
+          : "Update";
+  return (
+    <button
+      className={`sync-btn sync-${state}`}
+      onClick={onClick}
+      disabled={state === "syncing"}
+      title={error ?? "Pull latest from iCloud into this Mac (does not push)"}
+      aria-label="Update from Cloud"
+    >
+      {label}
+    </button>
+  );
+}
+
+function SyncButton(props: {
+  state: "idle" | "syncing" | "success" | "error";
+  lastSyncedMs: number | null;
+  error: string | null;
+  now: number;
+  onClick: () => void;
+}) {
+  const { state, lastSyncedMs, error, now, onClick } = props;
+  const label = (() => {
+    if (state === "syncing") return "Saving…";
+    if (state === "success") return "Saved";
+    if (state === "error") return "Retry";
+    if (lastSyncedMs == null) return "Save to Cloud";
+    const diff = Math.max(0, now - lastSyncedMs);
+    const min = Math.floor(diff / 60000);
+    if (min < 1) return "Saved just now";
+    if (min < 60) return `Saved ${min}m ago`;
+    const hr = Math.floor(min / 60);
+    if (hr < 24) return `Saved ${hr}h ago`;
+    return `Saved ${Math.floor(hr / 24)}d ago`;
+  })();
+  return (
+    <button
+      className={`sync-btn sync-${state}`}
+      onClick={onClick}
+      disabled={state === "syncing"}
+      title={error ?? "Pull from iCloud, merge with this Mac, push back"}
+      aria-label="Save to Cloud"
+    >
+      {label}
+    </button>
   );
 }
 
@@ -1253,7 +1440,11 @@ function StatsStrip(props: {
   const seasonStartDate = januaryFirst(currentYear);
   const seasonStartLP = currentSeason?.startLP ?? 0;
 
-  const streakState = computeStreakState(daysForCalc, day.date);
+  const streakState = computeStreakState(
+    daysForCalc,
+    day.date,
+    currentSeason?.streakOffset ?? 0,
+  );
   const streak = streakState.streak;
   const earnedLP = computeSeasonalLP(
     daysForCalc,
@@ -3314,46 +3505,42 @@ function SettingsView(props: {
         </p>
       </div>
 
-      {IS_PERSONAL && (
-        <>
-          <div className="setting">
-            <label className="toggle-row">
-              <span>Currency symbol</span>
-              <input
-                className="input select-compact"
-                value={settings.currencySymbol}
-                onChange={(e) =>
-                  onUpdate({ ...settings, currencySymbol: e.target.value })
-                }
-                maxLength={3}
-                placeholder="$"
-              />
-            </label>
-          </div>
+      <div className="setting">
+        <label className="toggle-row">
+          <span>Currency symbol</span>
+          <input
+            className="input select-compact"
+            value={settings.currencySymbol}
+            onChange={(e) =>
+              onUpdate({ ...settings, currencySymbol: e.target.value })
+            }
+            maxLength={3}
+            placeholder="$"
+          />
+        </label>
+      </div>
 
-          <div className="setting">
-            <div className="field">
-              <span>Export</span>
-            </div>
-            <div className="row-flex">
-              <button
-                className="btn btn-secondary"
-                onClick={() =>
-                  exportEarningsCSV(earnings, settings.currencySymbol)
-                }
-              >
-                Earnings CSV
-              </button>
-              <button
-                className="btn btn-secondary"
-                onClick={() => exportSessionsCSV(days, projectById)}
-              >
-                Sessions CSV
-              </button>
-            </div>
-          </div>
-        </>
-      )}
+      <div className="setting">
+        <div className="field">
+          <span>Export</span>
+        </div>
+        <div className="row-flex">
+          <button
+            className="btn btn-secondary"
+            onClick={() =>
+              exportEarningsCSV(earnings, settings.currencySymbol)
+            }
+          >
+            Earnings CSV
+          </button>
+          <button
+            className="btn btn-secondary"
+            onClick={() => exportSessionsCSV(days, projectById)}
+          >
+            Sessions CSV
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
