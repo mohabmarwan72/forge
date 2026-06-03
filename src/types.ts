@@ -58,6 +58,10 @@ export type BreakState = {
 export type CurrentTimer = {
   projectId: string;
   startedAtMs: number;
+  /** Wall-clock time of the last write while the timer is alive. Used to
+   *  detect sleep / power-loss / crashes: if the gap to now exceeds the
+   *  heartbeat interval by a wide margin, the missing time was not work. */
+  lastHeartbeatMs?: number;
 } | null;
 
 export type Tab = "today" | "week" | "ladder" | "money" | "settings";
@@ -74,6 +78,7 @@ export type Earning = {
 export type SeasonSnapshot = {
   year: number;
   startLP: number;
+  streakOffset?: number;
   finalLP?: number;
   finalTier?: number;
   finalDivision?: number;

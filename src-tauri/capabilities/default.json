@@ -19,35 +19,45 @@
       "identifier": "fs:allow-read-text-file",
       "allow": [
         { "path": "$HOME/Library/Mobile Documents/**" },
-        { "path": "$HOME/Documents/**" }
+        { "path": "$HOME/Documents/**" },
+        { "path": "$APPCONFIG/**" },
+        { "path": "$APPCONFIG" }
       ]
     },
     {
       "identifier": "fs:allow-write-text-file",
       "allow": [
         { "path": "$HOME/Library/Mobile Documents/**" },
-        { "path": "$HOME/Documents/**" }
+        { "path": "$HOME/Documents/**" },
+        { "path": "$APPCONFIG/**" },
+        { "path": "$APPCONFIG" }
       ]
     },
     {
       "identifier": "fs:allow-exists",
       "allow": [
         { "path": "$HOME/Library/Mobile Documents/**" },
-        { "path": "$HOME/Documents/**" }
+        { "path": "$HOME/Documents/**" },
+        { "path": "$APPCONFIG/**" },
+        { "path": "$APPCONFIG" }
       ]
     },
     {
       "identifier": "fs:allow-mkdir",
       "allow": [
         { "path": "$HOME/Library/Mobile Documents/**" },
-        { "path": "$HOME/Documents/**" }
+        { "path": "$HOME/Documents/**" },
+        { "path": "$APPCONFIG/**" },
+        { "path": "$APPCONFIG" }
       ]
     },
     {
       "identifier": "fs:allow-stat",
       "allow": [
         { "path": "$HOME/Library/Mobile Documents/**" },
-        { "path": "$HOME/Documents/**" }
+        { "path": "$HOME/Documents/**" },
+        { "path": "$APPCONFIG/**" },
+        { "path": "$APPCONFIG" }
       ]
     },
     "notification:default",
